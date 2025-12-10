@@ -1,8 +1,11 @@
 {
   "name": "whatsapp-bulk-sender",
   "version": "1.0.0",
-  "description": "Bulk WhatsApp Message Sender with Safety Features",
+  "description": "Beautylatory Smart Bulk WhatsApp Sender",
   "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js"

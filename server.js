@@ -74,23 +74,32 @@ if (fs.existsSync(contactsDbPath)) {
 
 // Initialize WhatsApp Client
 function initWhatsApp() {
+  const puppeteerConfig = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-gpu',
+      '--single-process',
+      '--no-zygote'
+    ]
+  };
+  
+  // Use system Chromium if available (for Railway/Docker)
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    puppeteerConfig.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+  
   waClient = new Client({
     authStrategy: new LocalAuth({ 
       clientId: settings.sessionName,
       dataPath: './.wwebjs_auth'
     }),
-    puppeteer: {
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu'
-      ]
-    }
+    puppeteer: puppeteerConfig
   });
 
   waClient.on('qr', async (qr) => {
