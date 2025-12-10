@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Beautylatory Smart Bulk Sender</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="header-content">
+        <div class="logo">
+          <div class="logo-icon"><i class="fab fa-whatsapp"></i></div>
+          <div class="logo-text">
+            <h1>Beautylatory</h1>
+            <span>Smart Bulk Sender</span>
+          </div>
+        </div>
+        <div class="header-stats">
+          <div class="stat-pill" id="connection-status">
+            <span class="status-dot"></span>
+            <span class="status-text">Disconnected</span>
+          </div>
+          <div class="stat-pill stat-counter">
+            <i class="fas fa-paper-plane"></i>
+            <span id="daily-counter">0/500</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <div class="grid-layout">
+        <!-- Left Column -->
+        <div class="left-column">
+          <!-- Connection Card -->
+          <section class="card" id="connection-card">
+            <div class="card-header">
+              <div class="card-icon"><i class="fas fa-link"></i></div>
+              <h2>Koneksi WhatsApp</h2>
+            </div>
+            <div class="card-body">
+              <div id="connection-info" class="connection-info" style="display:none">
+                <div class="connection-avatar"><i class="fas fa-user"></i></div>
+                <div class="connection-details">
+                  <div class="connection-name" id="wa-name">-</div>
+                  <div class="connection-phone" id="wa-phone">-</div>
+                </div>
+                <span class="connection-status-badge" id="wa-status-badge">Online</span>
+              </div>
+              
+              <div id="qr-container" class="qr-container">
+                <div id="qr-placeholder" class="qr-placeholder">
+                  <i class="fas fa-qrcode"></i>
+                  <p>Klik "Mulai" untuk scan QR Code</p>
+                </div>
+                <img id="qr-code" class="qr-code" style="display:none" alt="QR Code">
+              </div>
+              
+              <div class="btn-row">
+                <button id="btn-restart" class="btn btn-primary"><i class="fas fa-play"></i> Mulai</button>
+                <button id="btn-logout" class="btn btn-ghost"><i class="fas fa-sign-out-alt"></i> Logout</button>
+              </div>
+            </div>
+          </section>
+
+          <!-- Chat History Card -->
+          <section class="card" id="chat-history-card" style="display:none">
+            <div class="card-header">
+              <div class="card-icon"><i class="fas fa-comments"></i></div>
+              <h2>Riwayat Chat</h2>
+              <button id="btn-refresh-chats" class="btn btn-ghost btn-sm"><i class="fas fa-sync-alt"></i></button>
+            </div>
+            <div class="card-body" style="padding: 0;">
+              <div class="chat-list" id="chat-list">
+                <div class="chat-loading"><i class="fas fa-spinner fa-spin"></i> Memuat chat...</div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Contacts Preview Card -->
+          <section class="card" id="contacts-card">
+            <div class="card-header">
+              <div class="card-icon"><i class="fas fa-users"></i></div>
+              <h2>Daftar Kontak</h2>
+              <span class="badge" id="contacts-badge">0</span>
+            </div>
+            <div class="card-body">
+              <!-- Add Contact Buttons -->
+              <div class="add-contact-buttons">
+                <button class="btn btn-secondary btn-sm" id="btn-open-upload">
+                  <i class="fas fa-cloud-upload-alt"></i> Upload File
+                </button>
+                <button class="btn btn-secondary btn-sm" id="btn-open-manual">
+                  <i class="fas fa-keyboard"></i> Input Manual
+                </button>
+                <button class="btn btn-secondary btn-sm" id="btn-open-spreadsheet">
+                  <i class="fas fa-table"></i> Mode Tabel
+                </button>
+              </div>
+
+              <!-- Contacts Table -->
+              <div class="contacts-table-container" id="contacts-output">
+                <div class="table-header">
+                  <span id="contacts-count">0 kontak</span>
+                  <button id="btn-clear-contacts" class="btn btn-ghost btn-sm">
+                    <i class="fas fa-trash"></i> Hapus Semua
+                  </button>
+                </div>
+                <div class="table-wrapper">
+                  <table class="contacts-table">
+                    <thead>
+                      <tr>
+                        <th style="width: 10%">No</th>
+                        <th style="width: 40%">Nama</th>
+                        <th style="width: 40%">Nomor</th>
+                        <th style="width: 10%"></th>
+                      </tr>
+                    </thead>
+                    <tbody id="contacts-table-body">
+                      <tr class="empty-row">
+                        <td colspan="4" style="text-align:center;color:var(--text-muted);padding:30px">
+                          Belum ada kontak. Klik tombol di atas untuk menambahkan.
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- Right Column -->
+        <div class="right-column">
+          <!-- Message Card -->
+          <section class="card" id="message-card">
+            <div class="card-header">
+              <div class="card-icon"><i class="fas fa-comment-dots"></i></div>
+              <h2>Pesan</h2>
+            </div>
+            <div class="card-body">
+              <div class="format-toolbar">
+                <button class="format-btn" data-format="bold" title="Bold"><i class="fas fa-bold"></i></button>
+                <button class="format-btn" data-format="italic" title="Italic"><i class="fas fa-italic"></i></button>
+                <button class="format-btn" data-format="strike" title="Strikethrough"><i class="fas fa-strikethrough"></i></button>
+                <button class="format-btn" data-format="mono" title="Monospace"><i class="fas fa-code"></i></button>
+                <div class="toolbar-divider"></div>
+                <button class="format-btn" data-var="nama"><i class="fas fa-user"></i> {nama}</button>
+                <button class="format-btn" data-var="nomor"><i class="fas fa-phone"></i> {nomor}</button>
+              </div>
+              
+              <div class="message-editor">
+                <textarea id="message-template" placeholder="Ketik pesan Anda di sini..."></textarea>
+                <div class="char-count"><span id="char-count">0</span> karakter</div>
+              </div>
+
+              <div class="message-preview-container">
+                <div class="preview-header"><i class="fas fa-eye"></i> Preview Pesan</div>
+                <div class="message-preview">
+                  <div class="preview-bubble" id="message-preview-content">
+                    <span class="preview-placeholder">Preview akan muncul di sini...</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="media-section">
+                <div class="media-label"><i class="fas fa-paperclip"></i> Lampiran (opsional)</div>
+                <input type="file" id="media-file" accept="image/*,video/*,application/pdf" hidden>
+                <div id="media-preview" class="media-preview" style="display:none">
+                  <img id="media-preview-image" class="media-preview-image" src="" alt="">
+                  <div class="media-preview-info">
+                    <div class="media-preview-name" id="media-preview-name">-</div>
+                    <div class="media-preview-size" id="media-preview-size">-</div>
+                  </div>
+                  <button class="btn-remove" id="btn-remove-media"><i class="fas fa-times"></i></button>
+                </div>
+                <button id="btn-attach" class="btn btn-secondary"><i class="fas fa-image"></i> Pilih Gambar/File</button>
+              </div>
+            </div>
+          </section>
+
+          <!-- Settings Card -->
+          <section class="card" id="settings-card">
+            <div class="card-header">
+              <div class="card-icon"><i class="fas fa-shield-alt"></i></div>
+              <h2>Pengaturan Anti-Ban</h2>
+            </div>
+            <div class="card-body">
+              <div class="safety-presets">
+                <div class="preset-card safe" data-preset="safe">
+                  <div class="preset-icon">🛡️</div>
+                  <div class="preset-name">Aman</div>
+                  <div class="preset-desc">~100 pesan/hari</div>
+                </div>
+                <div class="preset-card balanced active" data-preset="balanced">
+                  <div class="preset-icon">⚖️</div>
+                  <div class="preset-name">Seimbang</div>
+                  <div class="preset-desc">~300 pesan/hari</div>
+                </div>
+                <div class="preset-card fast" data-preset="fast">
+                  <div class="preset-icon">⚡</div>
+                  <div class="preset-name">Cepat</div>
+                  <div class="preset-desc">~500 pesan/hari</div>
+                </div>
+              </div>
+
+              <div class="settings-divider">atau atur manual</div>
+
+              <div class="settings-grid">
+                <div class="setting-item">
+                  <label>Delay Min (detik)</label>
+                  <input type="number" id="min-delay" value="8" min="3">
+                </div>
+                <div class="setting-item">
+                  <label>Delay Max (detik)</label>
+                  <input type="number" id="max-delay" value="15" min="5">
+                </div>
+                <div class="setting-item">
+                  <label>Batch Size</label>
+                  <input type="number" id="batch-size" value="25" min="5">
+                </div>
+                <div class="setting-item">
+                  <label>Batch Rest (detik)</label>
+                  <input type="number" id="batch-rest" value="90" min="30">
+                </div>
+                <div class="setting-item">
+                  <label>Limit Harian</label>
+                  <input type="number" id="daily-limit" value="300" min="50" max="1000">
+                </div>
+                <div class="setting-item toggle-item">
+                  <label>Typing Simulation</label>
+                  <label class="toggle">
+                    <input type="checkbox" id="simulate-typing" checked>
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+              </div>
+              
+              <button id="btn-save-settings" class="btn btn-secondary btn-block" style="margin-top: 16px;">
+                <i class="fas fa-save"></i> Simpan Pengaturan
+              </button>
+            </div>
+          </section>
+
+          <!-- Send Card -->
+          <section class="card" id="send-card">
+            <div class="card-body">
+              <div class="send-buttons">
+                <button id="btn-send" class="btn btn-success btn-lg" disabled>
+                  <i class="fas fa-paper-plane"></i> Mulai Kirim
+                </button>
+                <button id="btn-stop" class="btn btn-danger btn-lg" disabled>
+                  <i class="fas fa-stop"></i> Stop
+                </button>
+              </div>
+              
+              <div id="progress-section" class="progress-section" style="display:none">
+                <div class="progress-ring-container">
+                  <svg class="progress-ring" width="120" height="120">
+                    <defs>
+                      <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                        <stop offset="0%" style="stop-color:#d4838f"/>
+                        <stop offset="100%" style="stop-color:#c45d6d"/>
+                      </linearGradient>
+                    </defs>
+                    <circle class="progress-ring-bg" cx="60" cy="60" r="52"/>
+                    <circle class="progress-ring-fill" id="progress-ring" cx="60" cy="60" r="52"/>
+                  </svg>
+                  <div class="progress-text"><span id="progress-percent">0%</span></div>
+                </div>
+                <div class="progress-stats">
+                  <div class="stat"><span class="stat-value" id="progress-sent">0</span><span class="stat-label">Terkirim</span></div>
+                  <div class="stat"><span class="stat-value" id="progress-failed">0</span><span class="stat-label">Gagal</span></div>
+                  <div class="stat"><span class="stat-value" id="progress-remaining">0</span><span class="stat-label">Sisa</span></div>
+                </div>
+                <div id="waiting-info" class="waiting-info" style="display:none">
+                  <div class="waiting-spinner"></div>
+                  <span>Menunggu <span id="wait-seconds">0</span> detik...</span>
+                  <span id="warmup-badge" class="warmup-badge" style="display:none">Warmup</span>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Log Section -->
+      <section class="card log-card">
+        <div class="card-header">
+          <div class="card-icon"><i class="fas fa-terminal"></i></div>
+          <h2>Log Aktivitas</h2>
+          <button id="btn-clear-log" class="btn btn-ghost btn-sm"><i class="fas fa-eraser"></i> Clear</button>
+        </div>
+        <div class="card-body">
+          <div class="log-container" id="log-container"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <p><i class="fas fa-exclamation-triangle"></i> Gunakan dengan bijak. Risiko banned ditanggung pengguna.</p>
+    </footer>
+  </div>
+
+
+  <!-- MODALS -->
+  <!-- Upload Modal -->
+  <div class="modal" id="modal-upload">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3><i class="fas fa-cloud-upload-alt"></i> Upload File Kontak</h3>
+        <button class="modal-close"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="modal-body">
+        <div class="upload-zone" id="upload-zone">
+          <input type="file" id="contacts-file" accept=".csv,.xlsx,.xls" hidden>
+          <div class="upload-icon"><i class="fas fa-cloud-upload-alt"></i></div>
+          <p>Drag & drop file atau <a href="#" id="browse-link">pilih file</a></p>
+          <span class="upload-hint">Format: CSV, Excel (.xlsx, .xls)</span>
+          <span class="upload-hint">Kolom: phone/nomor, name/nama</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manual Input Modal -->
+  <div class="modal" id="modal-manual">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3><i class="fas fa-keyboard"></i> Input Manual</h3>
+        <button class="modal-close"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="modal-body">
+        <div class="input-group">
+          <label>Nama</label>
+          <input type="text" id="manual-name" placeholder="John Doe">
+        </div>
+        <div class="input-group" style="margin-top:12px">
+          <label>Nomor Telepon</label>
+          <input type="text" id="manual-phone" placeholder="08123456789">
+        </div>
+        <button id="btn-add-contact" class="btn btn-primary btn-block" style="margin-top:16px">
+          <i class="fas fa-plus"></i> Tambah Kontak
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Spreadsheet Modal -->
+  <div class="modal" id="modal-spreadsheet">
+    <div class="modal-overlay"></div>
+    <div class="modal-content modal-large">
+      <div class="modal-header">
+        <h3><i class="fas fa-table"></i> Mode Tabel</h3>
+        <button class="modal-close"><i class="fas fa-times"></i></button>
+      </div>
+      <div class="modal-body">
+        <p style="margin-bottom:12px;color:var(--text-secondary);font-size:0.85rem">
+          Masukkan data seperti di spreadsheet. Tekan Enter untuk pindah baris.
+        </p>
+        <div class="spreadsheet-container">
+          <table class="spreadsheet-table">
+            <thead>
+              <tr>
+                <th style="width:45%">Nama</th>
+                <th style="width:45%">Nomor</th>
+                <th style="width:10%"></th>
+              </tr>
+            </thead>
+            <tbody id="spreadsheet-body"></tbody>
+          </table>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:10px">
+          <button id="btn-add-row" class="btn btn-ghost btn-sm"><i class="fas fa-plus"></i> Tambah Baris</button>
+          <button id="btn-save-spreadsheet" class="btn btn-primary btn-sm"><i class="fas fa-save"></i> Simpan Semua</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

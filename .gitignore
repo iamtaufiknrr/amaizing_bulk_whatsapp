@@ -1,0 +1,10 @@
+node_modules/
+.wwebjs_auth/
+.wwebjs_cache/
+uploads/
+logs/
+sessions/
+data/contacts-db.json
+data/settings.json
+.env
+*.log
