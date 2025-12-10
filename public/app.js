@@ -1,7 +1,49 @@
-// Socket.IO connection
+// ============ SESSION MANAGEMENT ============
+let sessionId = null;
+const SESSION_KEY = 'beautylatory_session_id';
+
+// Get or create session
+async function initSession() {
+  // Check localStorage for existing session
+  sessionId = localStorage.getItem(SESSION_KEY);
+  
+  if (sessionId) {
+    // Verify session exists on server
+    try {
+      const res = await fetch(`/api/session/${sessionId}/status`);
+      const data = await res.json();
+      
+      if (data.success && data.exists) {
+        console.log('Existing session found:', sessionId.substring(0, 8));
+        return true;
+      }
+    } catch (e) {
+      console.error('Session check failed:', e);
+    }
+  }
+  
+  // Create new session
+  try {
+    const res = await fetch('/api/session/create', { method: 'POST' });
+    const data = await res.json();
+    
+    if (data.success) {
+      sessionId = data.sessionId;
+      localStorage.setItem(SESSION_KEY, sessionId);
+      console.log('New session created:', sessionId.substring(0, 8));
+      return true;
+    }
+  } catch (e) {
+    console.error('Failed to create session:', e);
+  }
+  
+  return false;
+}
+
+// ============ SOCKET.IO ============
 const socket = io();
 
-// State
+// ============ STATE ============
 let contacts = [];
 let mediaPath = null;
 let mediaPreviewUrl = null;
@@ -14,61 +56,68 @@ const PRESETS = {
   fast: { minDelay: 5, maxDelay: 10, batchSize: 35, batchRest: 60, dailyLimit: 500 }
 };
 
-// Wait for DOM
-document.addEventListener('DOMContentLoaded', function() {
-  init();
+// ============ INIT ============
+document.addEventListener('DOMContentLoaded', async function() {
+  console.log('Initializing app...');
+  
+  // Initialize session first
+  const sessionOk = await initSession();
+  if (!sessionOk) {
+    alert('Gagal membuat session. Silakan refresh halaman.');
+    return;
+  }
+  
+  // Register session with socket
+  socket.emit('register_session', { sessionId });
+  
+  // Load data
+  await loadStatus();
+  await loadContacts();
+  
+  // Setup UI
+  setupEventListeners();
+  setupModals();
+  setupFormatToolbar();
+  setupPresets();
+  addSpreadsheetRows(5);
+  updateMessagePreview();
+  
+  console.log('App initialized with session:', sessionId.substring(0, 8));
 });
 
-// Initialize
-async function init() {
-  console.log('Initializing app...');
-  try {
-    await loadStatus();
-    await loadContacts();
-    setupEventListeners();
-    setupModals();
-    setupFormatToolbar();
-    setupPresets();
-    addSpreadsheetRows(5);
-    updateMessagePreview();
-    console.log('App initialized successfully');
-  } catch (error) {
-    console.error('Init error:', error);
-  }
-}
-
-// DOM helper - single element
+// ============ DOM HELPERS ============
 function $(selector) {
   return document.querySelector(selector);
 }
 
-// DOM helper - multiple elements
 function $$(selector) {
   return document.querySelectorAll(selector);
 }
 
-// Load status from server
+// ============ API CALLS ============
 async function loadStatus() {
   try {
-    const res = await fetch('/api/status');
+    const res = await fetch(`/api/session/${sessionId}/status`);
     const data = await res.json();
-    updateConnectionStatus(data.connected, data.waInfo);
-    $('#daily-counter').textContent = data.dailyCount + '/' + data.dailyLimit;
-    $('#min-delay').value = data.settings.minDelay;
-    $('#max-delay').value = data.settings.maxDelay;
-    $('#batch-size').value = data.settings.batchSize;
-    $('#batch-rest').value = data.settings.batchRestMin;
-    $('#daily-limit').value = data.settings.dailyLimit;
-    $('#simulate-typing').checked = data.settings.simulateTyping;
+    
+    if (data.success) {
+      updateConnectionStatus(data.connected, data.waInfo);
+      $('#daily-counter').textContent = data.dailyCount + '/' + data.dailyLimit;
+      $('#min-delay').value = data.settings.minDelay;
+      $('#max-delay').value = data.settings.maxDelay;
+      $('#batch-size').value = data.settings.batchSize;
+      $('#batch-rest').value = data.settings.batchRestMin;
+      $('#daily-limit').value = data.settings.dailyLimit;
+      $('#simulate-typing').checked = data.settings.simulateTyping;
+    }
   } catch (error) {
     console.error('Failed to load status:', error);
   }
 }
 
-// Load contacts from server
 async function loadContacts() {
   try {
-    const res = await fetch('/api/contacts');
+    const res = await fetch(`/api/session/${sessionId}/contacts`);
     const data = await res.json();
     contacts = data.contacts || [];
     updateContactsUI();
@@ -78,7 +127,7 @@ async function loadContacts() {
   }
 }
 
-// Update connection status UI
+// ============ UI UPDATES ============
 function updateConnectionStatus(connected, waInfo) {
   const statusPill = $('#connection-status');
   const statusText = statusPill.querySelector('.status-text');
@@ -105,13 +154,11 @@ function updateConnectionStatus(connected, waInfo) {
   updateSendButton();
 }
 
-// Update send button state
 function updateSendButton() {
   const isConnected = $('#connection-status').classList.contains('connected');
   $('#btn-send').disabled = !isConnected || contacts.length === 0;
 }
 
-// Update contacts UI
 function updateContactsUI() {
   $('#contacts-badge').textContent = contacts.length;
   $('#contacts-count').textContent = contacts.length + ' kontak';
@@ -133,7 +180,6 @@ function updateContactsUI() {
   updateSendButton();
 }
 
-// Render chat list
 function renderChats(chats) {
   const chatList = $('#chat-list');
   if (!chats || chats.length === 0) {
@@ -161,7 +207,6 @@ function getInitials(name) {
   return name.substring(0, 2).toUpperCase();
 }
 
-// Add log entry
 function addLog(message, type) {
   type = type || 'info';
   const time = new Date().toLocaleTimeString();
@@ -176,7 +221,6 @@ function addLog(message, type) {
 
 // ============ EVENT LISTENERS ============
 function setupEventListeners() {
-  // Upload zone drag & drop
   const uploadZone = $('#upload-zone');
   const contactsFile = $('#contacts-file');
   
@@ -201,29 +245,24 @@ function setupEventListeners() {
     if (e.target.files.length) handleContactsFile(e.target.files[0]);
   });
   
-  // Manual contact
   $('#btn-add-contact').addEventListener('click', addManualContact);
   $('#manual-phone').addEventListener('keypress', function(e) {
     if (e.key === 'Enter') addManualContact();
   });
   
-  // Spreadsheet
   $('#btn-add-row').addEventListener('click', function() { addSpreadsheetRows(1); });
   $('#btn-save-spreadsheet').addEventListener('click', saveSpreadsheetContacts);
   
-  // Media
   $('#btn-attach').addEventListener('click', function() { $('#media-file').click(); });
   $('#media-file').addEventListener('change', handleMediaFile);
   $('#btn-remove-media').addEventListener('click', removeMedia);
   
-  // Message preview
   $('#message-template').addEventListener('input', function() {
     $('#char-count').textContent = this.value.length;
     updateMessagePreview();
   });
   
-  // Main buttons
-  $('#btn-restart').addEventListener('click', restartWhatsApp);
+  $('#btn-restart').addEventListener('click', startWhatsApp);
   $('#btn-logout').addEventListener('click', logoutWhatsApp);
   $('#btn-save-settings').addEventListener('click', saveSettings);
   $('#btn-clear-contacts').addEventListener('click', clearAllContacts);
@@ -239,12 +278,8 @@ function setupModals() {
   $('#btn-open-manual').addEventListener('click', function() { openModal('modal-manual'); });
   $('#btn-open-spreadsheet').addEventListener('click', function() { openModal('modal-spreadsheet'); });
   
-  $$('.modal-close').forEach(function(btn) {
-    btn.addEventListener('click', closeAllModals);
-  });
-  $$('.modal-overlay').forEach(function(overlay) {
-    overlay.addEventListener('click', closeAllModals);
-  });
+  $$('.modal-close').forEach(function(btn) { btn.addEventListener('click', closeAllModals); });
+  $$('.modal-overlay').forEach(function(overlay) { overlay.addEventListener('click', closeAllModals); });
 }
 
 function openModal(id) {
@@ -341,39 +376,31 @@ function updateMessagePreview() {
 
 
 // ============ CONTACTS FUNCTIONS ============
-
-// Handle file upload - FIXED
 async function handleContactsFile(file) {
-  console.log('Uploading file:', file.name);
   const formData = new FormData();
   formData.append('file', file);
   
   try {
-    const res = await fetch('/api/upload-contacts', { method: 'POST', body: formData });
+    const res = await fetch(`/api/session/${sessionId}/upload-contacts`, { method: 'POST', body: formData });
     const data = await res.json();
-    console.log('Upload response:', data);
     
     if (data.success) {
-      await loadContacts(); // Reload from server
+      await loadContacts();
       addLog(data.contacts.length + ' kontak dimuat dari file', 'success');
-      closeAllModals(); // Close modal after success
+      closeAllModals();
     } else {
       addLog('Gagal: ' + (data.error || 'Unknown error'), 'error');
     }
   } catch (error) {
-    console.error('Upload error:', error);
     addLog('Error: ' + error.message, 'error');
   }
 }
 
-// Add manual contact - FIXED
 async function addManualContact() {
   const nameInput = $('#manual-name');
   const phoneInput = $('#manual-phone');
   const name = nameInput.value.trim();
   const phone = phoneInput.value.trim();
-  
-  console.log('Adding manual contact:', name, phone);
   
   if (!phone) {
     addLog('Nomor telepon diperlukan', 'warn');
@@ -381,13 +408,12 @@ async function addManualContact() {
   }
   
   try {
-    const res = await fetch('/api/contacts', {
+    const res = await fetch(`/api/session/${sessionId}/contacts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, phone: phone })
+      body: JSON.stringify({ name, phone })
     });
     const data = await res.json();
-    console.log('Add contact response:', data);
     
     if (data.success) {
       contacts.push(data.contact);
@@ -395,35 +421,30 @@ async function addManualContact() {
       nameInput.value = '';
       phoneInput.value = '';
       addLog('Kontak ditambahkan: ' + (name || phone), 'success');
-      closeAllModals(); // Close modal after success
+      closeAllModals();
     } else {
       addLog('Gagal: ' + (data.error || 'Unknown error'), 'error');
     }
   } catch (error) {
-    console.error('Add contact error:', error);
     addLog('Error: ' + error.message, 'error');
   }
 }
 
-// Delete contact - global function
 window.deleteContact = async function(id) {
-  console.log('Deleting contact:', id);
   try {
-    await fetch('/api/contacts/' + id, { method: 'DELETE' });
+    await fetch(`/api/session/${sessionId}/contacts/${id}`, { method: 'DELETE' });
     contacts = contacts.filter(function(c) { return c.id !== id; });
     updateContactsUI();
     addLog('Kontak dihapus', 'info');
   } catch (error) {
-    console.error('Delete error:', error);
     addLog('Error: ' + error.message, 'error');
   }
 };
 
-// Clear all contacts
 async function clearAllContacts() {
   if (!confirm('Hapus semua kontak?')) return;
   try {
-    await fetch('/api/contacts', { method: 'DELETE' });
+    await fetch(`/api/session/${sessionId}/contacts`, { method: 'DELETE' });
     contacts = [];
     updateContactsUI();
     addLog('Semua kontak dihapus', 'info');
@@ -460,7 +481,6 @@ function addSpreadsheetRows(count) {
   }
 }
 
-// Save spreadsheet contacts - FIXED
 async function saveSpreadsheetContacts() {
   const rows = $('#spreadsheet-body').querySelectorAll('tr');
   const newContacts = [];
@@ -471,11 +491,9 @@ async function saveSpreadsheetContacts() {
     if (nameInput && phoneInput) {
       const name = nameInput.value.trim();
       const phone = phoneInput.value.trim();
-      if (phone) newContacts.push({ name: name, phone: phone });
+      if (phone) newContacts.push({ name, phone });
     }
   });
-  
-  console.log('Saving spreadsheet contacts:', newContacts);
   
   if (newContacts.length === 0) {
     addLog('Tidak ada kontak untuk disimpan', 'warn');
@@ -483,25 +501,23 @@ async function saveSpreadsheetContacts() {
   }
   
   try {
-    const res = await fetch('/api/contacts/bulk', {
+    const res = await fetch(`/api/session/${sessionId}/contacts/bulk`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contacts: newContacts })
     });
     const data = await res.json();
-    console.log('Bulk save response:', data);
     
     if (data.success) {
-      await loadContacts(); // Reload from server
+      await loadContacts();
       addLog(newContacts.length + ' kontak ditambahkan', 'success');
       $('#spreadsheet-body').innerHTML = '';
       addSpreadsheetRows(5);
-      closeAllModals(); // Close modal after success
+      closeAllModals();
     } else {
       addLog('Gagal: ' + (data.error || 'Unknown error'), 'error');
     }
   } catch (error) {
-    console.error('Bulk save error:', error);
     addLog('Error: ' + error.message, 'error');
   }
 }
@@ -551,7 +567,7 @@ async function uploadMedia(file) {
   const formData = new FormData();
   formData.append('file', file);
   try {
-    const res = await fetch('/api/upload-media', { method: 'POST', body: formData });
+    const res = await fetch(`/api/session/${sessionId}/upload-media`, { method: 'POST', body: formData });
     const data = await res.json();
     if (data.success) {
       mediaPath = data.filePath;
@@ -576,7 +592,7 @@ async function saveSettings() {
   };
   
   try {
-    const res = await fetch('/api/settings', {
+    const res = await fetch(`/api/session/${sessionId}/settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings)
@@ -592,33 +608,26 @@ async function saveSettings() {
 async function refreshChats() {
   $('#chat-list').innerHTML = '<div class="chat-loading"><i class="fas fa-spinner fa-spin"></i> Memuat chat...</div>';
   try {
-    const res = await fetch('/api/chats/refresh', { method: 'POST' });
-    const data = await res.json();
-    if (data.success) {
-      renderChats(data.chats);
-      addLog(data.chats.length + ' chat dimuat', 'success');
-    }
+    await fetch(`/api/session/${sessionId}/chats/refresh`, { method: 'POST' });
   } catch (error) {
     addLog('Error: ' + error.message, 'error');
   }
 }
 
-async function restartWhatsApp() {
-  try {
-    $('#qr-placeholder').innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:48px;color:var(--pink-300)"></i><p>Memulai koneksi...</p>';
-    $('#qr-placeholder').style.display = 'block';
-    $('#qr-code').style.display = 'none';
-    await fetch('/api/restart', { method: 'POST' });
-    addLog('Memulai koneksi WhatsApp...', 'info');
-  } catch (error) {
-    addLog('Error: ' + error.message, 'error');
-  }
+function startWhatsApp() {
+  $('#qr-placeholder').innerHTML = '<i class="fas fa-spinner fa-spin" style="font-size:48px;color:var(--pink-300)"></i><p>Memulai koneksi...</p>';
+  $('#qr-placeholder').style.display = 'block';
+  $('#qr-code').style.display = 'none';
+  
+  // Tell server to start WhatsApp for this session
+  socket.emit('start_whatsapp', { sessionId });
+  addLog('Memulai koneksi WhatsApp...', 'info');
 }
 
 async function logoutWhatsApp() {
   if (!confirm('Yakin ingin logout?')) return;
   try {
-    await fetch('/api/logout', { method: 'POST' });
+    await fetch(`/api/session/${sessionId}/logout`, { method: 'POST' });
     addLog('Berhasil logout', 'info');
     updateConnectionStatus(false, null);
   } catch (error) {
@@ -634,10 +643,10 @@ async function startSending() {
   if (!confirm('Kirim pesan ke ' + contacts.length + ' kontak?')) return;
   
   try {
-    const res = await fetch('/api/send-bulk', {
+    const res = await fetch(`/api/session/${sessionId}/send-bulk`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contacts: contacts, message: message, mediaPath: mediaPath })
+      body: JSON.stringify({ contacts, message, mediaPath })
     });
     const data = await res.json();
     if (data.success) {
@@ -657,7 +666,7 @@ async function startSending() {
 
 async function stopSending() {
   try {
-    await fetch('/api/stop', { method: 'POST' });
+    await fetch(`/api/session/${sessionId}/stop`, { method: 'POST' });
     $('#btn-stop').disabled = true;
     addLog('Menghentikan...', 'warn');
   } catch (error) {
@@ -707,6 +716,7 @@ socket.on('qr', function(qrDataUrl) {
 
 socket.on('chats_loaded', function(chats) {
   renderChats(chats);
+  addLog(chats.length + ' chat dimuat', 'success');
 });
 
 socket.on('log', function(data) {
@@ -763,4 +773,8 @@ socket.on('limit_reached', function(data) {
   alert('Batas harian tercapai (' + data.limit + '). Lanjutkan besok.');
   $('#btn-send').disabled = true;
   $('#btn-stop').disabled = true;
+});
+
+socket.on('error', function(data) {
+  addLog('Error: ' + data.message, 'error');
 });

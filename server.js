@@ -8,6 +8,7 @@ const { parse } = require('csv-parse/sync');
 const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
@@ -19,28 +20,23 @@ app.use(express.static('public'));
 app.use('/uploads', express.static('uploads'));
 
 // Ensure directories exist
-['data', 'logs', 'uploads', '.wwebjs_auth'].forEach(dir => {
+['data', 'logs', 'uploads', 'sessions'].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
 // Multer config
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+  filename: (req, file, cb) => cb(null, Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '-' + file.originalname)
 });
 const upload = multer({ storage });
 
-// Global state
-let waClient = null;
-let isClientReady = false;
-let sendingInProgress = false;
-let currentJob = null;
-let messageLog = [];
-let waInfo = null;
-let cachedChats = []; // Cache chats
+// ============ MULTI-USER SESSION MANAGEMENT ============
+// Store active WhatsApp clients per session
+const userSessions = new Map(); // sessionId -> { client, isReady, waInfo, contacts, settings, dailyCounter }
 
-// Settings
-let settings = {
+// Default settings
+const DEFAULT_SETTINGS = {
   minDelay: 8,
   maxDelay: 15,
   batchSize: 25,
@@ -51,29 +47,103 @@ let settings = {
   warmupDelayMax: 25,
   dailyLimit: 300,
   simulateTyping: true,
-  addRandomPause: true,
-  sessionName: 'beautylatory-session'
+  addRandomPause: true
 };
 
-// Daily counter
-let dailyCounter = { date: new Date().toDateString(), count: 0 };
-let sessionCounter = 0;
-
-// Load settings
-const settingsPath = './data/settings.json';
-if (fs.existsSync(settingsPath)) {
-  settings = { ...settings, ...JSON.parse(fs.readFileSync(settingsPath)) };
+// Generate unique session ID
+function generateSessionId() {
+  return crypto.randomBytes(16).toString('hex');
 }
 
-// Load contacts database
-const contactsDbPath = './data/contacts-db.json';
-let contactsDb = [];
-if (fs.existsSync(contactsDbPath)) {
-  contactsDb = JSON.parse(fs.readFileSync(contactsDbPath));
+// Get or create user session
+function getSession(sessionId) {
+  if (!userSessions.has(sessionId)) {
+    return null;
+  }
+  return userSessions.get(sessionId);
 }
 
-// Initialize WhatsApp Client
-function initWhatsApp() {
+// Create new session
+function createSession(sessionId) {
+  const session = {
+    client: null,
+    isReady: false,
+    waInfo: null,
+    contacts: [],
+    settings: { ...DEFAULT_SETTINGS },
+    dailyCounter: { date: new Date().toDateString(), count: 0 },
+    sessionCounter: 0,
+    sendingInProgress: false,
+    currentJob: null,
+    socketId: null
+  };
+  userSessions.set(sessionId, session);
+  
+  // Load saved data if exists
+  loadSessionData(sessionId, session);
+  
+  return session;
+}
+
+// Save session data to file
+function saveSessionData(sessionId, session) {
+  const dataPath = `./data/session-${sessionId}.json`;
+  const data = {
+    contacts: session.contacts,
+    settings: session.settings,
+    dailyCounter: session.dailyCounter
+  };
+  fs.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+}
+
+// Load session data from file
+function loadSessionData(sessionId, session) {
+  const dataPath = `./data/session-${sessionId}.json`;
+  if (fs.existsSync(dataPath)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(dataPath));
+      session.contacts = data.contacts || [];
+      session.settings = { ...DEFAULT_SETTINGS, ...data.settings };
+      session.dailyCounter = data.dailyCounter || { date: new Date().toDateString(), count: 0 };
+    } catch (e) {
+      console.error('Error loading session data:', e);
+    }
+  }
+}
+
+// Logging function
+function log(sessionId, message, type = 'info') {
+  const timestamp = new Date().toISOString();
+  const logEntry = { timestamp, type, message };
+  
+  // Log to file
+  const logFile = `./logs/${new Date().toISOString().split('T')[0]}.log`;
+  fs.appendFileSync(logFile, `[${timestamp}] [${sessionId?.substring(0, 8) || 'SYSTEM'}] [${type.toUpperCase()}] ${message}\n`);
+  
+  // Emit to specific session socket
+  const session = getSession(sessionId);
+  if (session && session.socketId) {
+    io.to(session.socketId).emit('log', logEntry);
+  }
+  
+  return logEntry;
+}
+
+
+// ============ WHATSAPP CLIENT MANAGEMENT ============
+
+// Initialize WhatsApp Client for a session
+function initWhatsAppForSession(sessionId, socket) {
+  const session = getSession(sessionId);
+  if (!session) return;
+  
+  // Destroy existing client if any
+  if (session.client) {
+    try {
+      session.client.destroy();
+    } catch (e) {}
+  }
+  
   const puppeteerConfig = {
     headless: true,
     args: [
@@ -84,110 +154,99 @@ function initWhatsApp() {
       '--no-first-run',
       '--no-zygote',
       '--disable-gpu',
-      '--single-process',
-      '--no-zygote'
+      '--single-process'
     ]
   };
   
-  // Use system Chromium if available (for Railway/Docker)
   if (process.env.PUPPETEER_EXECUTABLE_PATH) {
     puppeteerConfig.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
   }
   
-  waClient = new Client({
-    authStrategy: new LocalAuth({ 
-      clientId: settings.sessionName,
-      dataPath: './.wwebjs_auth'
+  session.client = new Client({
+    authStrategy: new LocalAuth({
+      clientId: sessionId,
+      dataPath: './sessions'
     }),
     puppeteer: puppeteerConfig
   });
-
-  waClient.on('qr', async (qr) => {
+  
+  session.client.on('qr', async (qr) => {
     const qrDataUrl = await QRCode.toDataURL(qr);
-    io.emit('qr', qrDataUrl);
-    io.emit('status', { status: 'waiting_qr', message: 'Scan QR Code dengan WhatsApp' });
+    socket.emit('qr', qrDataUrl);
+    socket.emit('status', { status: 'waiting_qr', message: 'Scan QR Code dengan WhatsApp' });
   });
-
-  waClient.on('ready', async () => {
-    isClientReady = true;
-    sessionCounter = 0;
+  
+  session.client.on('ready', async () => {
+    session.isReady = true;
+    session.sessionCounter = 0;
     
-    // Get WhatsApp user info - FIXED
     try {
-      // Wait a bit for client to fully initialize
       await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const info = waClient.info;
+      const info = session.client.info;
       if (info) {
-        waInfo = {
+        session.waInfo = {
           pushname: info.pushname || 'WhatsApp User',
           wid: info.wid ? info.wid.user : 'Unknown',
           platform: info.platform || 'Unknown'
         };
-        log(`Connected as: ${waInfo.pushname} (${waInfo.wid})`);
       }
     } catch (e) {
-      log('Could not get WA info: ' + e.message, 'warn');
-      waInfo = { pushname: 'WhatsApp User', wid: 'Connected', platform: 'Unknown' };
+      session.waInfo = { pushname: 'WhatsApp User', wid: 'Connected', platform: 'Unknown' };
     }
     
-    // Load chats in background
-    loadChatsInBackground();
+    socket.emit('status', { status: 'ready', message: 'WhatsApp terhubung!', waInfo: session.waInfo });
+    log(sessionId, `Connected as: ${session.waInfo?.pushname} (${session.waInfo?.wid})`);
     
-    io.emit('status', { 
-      status: 'ready', 
-      message: 'WhatsApp terhubung!',
-      waInfo 
-    });
+    // Load chats
+    loadChatsForSession(sessionId, socket);
   });
-
-  waClient.on('authenticated', () => {
-    io.emit('status', { status: 'authenticated', message: 'Autentikasi berhasil' });
-    log('WhatsApp authenticated');
+  
+  session.client.on('authenticated', () => {
+    socket.emit('status', { status: 'authenticated', message: 'Autentikasi berhasil' });
+    log(sessionId, 'WhatsApp authenticated');
   });
-
-  waClient.on('auth_failure', (msg) => {
-    io.emit('status', { status: 'auth_failure', message: 'Autentikasi gagal: ' + msg });
-    log('Auth failure: ' + msg, 'error');
+  
+  session.client.on('auth_failure', (msg) => {
+    socket.emit('status', { status: 'auth_failure', message: 'Autentikasi gagal: ' + msg });
+    log(sessionId, 'Auth failure: ' + msg, 'error');
   });
-
-  waClient.on('disconnected', (reason) => {
-    isClientReady = false;
-    waInfo = null;
-    cachedChats = [];
-    io.emit('status', { status: 'disconnected', message: 'Terputus: ' + reason });
-    log('Disconnected: ' + reason, 'warn');
+  
+  session.client.on('disconnected', (reason) => {
+    session.isReady = false;
+    session.waInfo = null;
+    socket.emit('status', { status: 'disconnected', message: 'Terputus: ' + reason });
+    log(sessionId, 'Disconnected: ' + reason, 'warn');
   });
-
-  waClient.initialize();
+  
+  session.client.initialize();
 }
 
-// Load chats in background
-async function loadChatsInBackground() {
-  if (!isClientReady || !waClient) return;
+// Load chats for session
+async function loadChatsForSession(sessionId, socket) {
+  const session = getSession(sessionId);
+  if (!session || !session.isReady || !session.client) return;
   
   try {
-    log('Loading chat history...');
-    const chats = await waClient.getChats();
+    log(sessionId, 'Loading chat history...');
+    const chats = await session.client.getChats();
+    const chatList = [];
     
-    cachedChats = [];
-    for (const chat of chats.slice(0, 50)) {
+    for (const chat of chats.slice(0, 30)) {
       try {
         let lastMessage = '';
         let timestamp = '';
         
-        // Get last message
         const messages = await chat.fetchMessages({ limit: 1 });
         if (messages && messages.length > 0) {
           const msg = messages[0];
-          lastMessage = msg.body ? msg.body.substring(0, 60) : (msg.type || '');
+          lastMessage = msg.body ? msg.body.substring(0, 50) : '';
           if (msg.timestamp) {
             const date = new Date(msg.timestamp * 1000);
             timestamp = date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
           }
         }
         
-        cachedChats.push({
+        chatList.push({
           id: chat.id._serialized,
           name: chat.name || (chat.id.user ? chat.id.user : 'Unknown'),
           isGroup: chat.isGroup,
@@ -195,37 +254,23 @@ async function loadChatsInBackground() {
           lastMessage,
           timestamp
         });
-      } catch (e) {
-        // Skip problematic chats
-      }
+      } catch (e) {}
     }
     
-    log(`Loaded ${cachedChats.length} chats`);
-    io.emit('chats_loaded', cachedChats);
+    socket.emit('chats_loaded', chatList);
+    log(sessionId, `Loaded ${chatList.length} chats`);
   } catch (error) {
-    log('Error loading chats: ' + error.message, 'error');
+    log(sessionId, 'Error loading chats: ' + error.message, 'error');
   }
 }
 
-// Logging function
-function log(message, type = 'info') {
-  const timestamp = new Date().toISOString();
-  const logEntry = { timestamp, type, message };
-  messageLog.push(logEntry);
-  if (messageLog.length > 1000) messageLog.shift();
-  
-  const logFile = `./logs/${new Date().toISOString().split('T')[0]}.log`;
-  fs.appendFileSync(logFile, `[${timestamp}] [${type.toUpperCase()}] ${message}\n`);
-  io.emit('log', logEntry);
-}
+// ============ HELPER FUNCTIONS ============
 
-
-// ============ DELAY & SAFETY FUNCTIONS ============
-
-function getHumanizedDelay() {
+function getHumanizedDelay(session) {
+  const settings = session.settings;
   let minDelay, maxDelay;
   
-  if (sessionCounter < settings.warmupMessages) {
+  if (session.sessionCounter < settings.warmupMessages) {
     minDelay = settings.warmupDelayMin;
     maxDelay = settings.warmupDelayMax;
   } else {
@@ -242,33 +287,33 @@ function getHumanizedDelay() {
   return delay * 1000;
 }
 
-function needsBatchRest(messageIndex) {
-  return messageIndex > 0 && messageIndex % settings.batchSize === 0;
+function needsBatchRest(session, messageIndex) {
+  return messageIndex > 0 && messageIndex % session.settings.batchSize === 0;
 }
 
-function getBatchRestDuration() {
-  const min = settings.batchRestMin;
-  const max = settings.batchRestMax;
+function getBatchRestDuration(session) {
+  const min = session.settings.batchRestMin;
+  const max = session.settings.batchRestMax;
   return Math.floor(Math.random() * (max - min + 1) + min) * 1000;
 }
 
-async function simulateTyping(chatId) {
-  if (!settings.simulateTyping) return;
+async function simulateTyping(session, chatId) {
+  if (!session.settings.simulateTyping) return;
   try {
-    const chat = await waClient.getChatById(chatId);
+    const chat = await session.client.getChatById(chatId);
     await chat.sendStateTyping();
     await new Promise(resolve => setTimeout(resolve, 2000));
     await chat.clearState();
   } catch (e) {}
 }
 
-function checkDailyLimit() {
+function checkDailyLimit(session) {
   const today = new Date().toDateString();
-  if (dailyCounter.date !== today) {
-    dailyCounter = { date: today, count: 0 };
-    sessionCounter = 0;
+  if (session.dailyCounter.date !== today) {
+    session.dailyCounter = { date: today, count: 0 };
+    session.sessionCounter = 0;
   }
-  return dailyCounter.count < settings.dailyLimit;
+  return session.dailyCounter.count < session.settings.dailyLimit;
 }
 
 function formatPhoneNumber(phone) {
@@ -310,74 +355,62 @@ function replaceVariables(template, contact) {
     .replace(/\{nomor\}/gi, contact.phone || '');
 }
 
-function saveContactsDb() {
-  fs.writeFileSync(contactsDbPath, JSON.stringify(contactsDb, null, 2));
-}
 
 // ============ API ROUTES ============
 
-// Get status
-app.get('/api/status', (req, res) => {
+// Create new session
+app.post('/api/session/create', (req, res) => {
+  const sessionId = generateSessionId();
+  createSession(sessionId);
+  log(sessionId, 'New session created');
+  res.json({ success: true, sessionId });
+});
+
+// Check session exists
+app.get('/api/session/:sessionId/status', (req, res) => {
+  const { sessionId } = req.params;
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.json({ success: false, exists: false });
+  }
+  
   res.json({
-    connected: isClientReady,
-    sending: sendingInProgress,
-    dailyCount: dailyCounter.count,
-    dailyLimit: settings.dailyLimit,
-    sessionCount: sessionCounter,
-    waInfo,
-    settings
+    success: true,
+    exists: true,
+    connected: session.isReady,
+    waInfo: session.waInfo,
+    dailyCount: session.dailyCounter.count,
+    dailyLimit: session.settings.dailyLimit,
+    settings: session.settings
   });
 });
 
-// Get chat history - FIXED
-app.get('/api/chats', async (req, res) => {
-  try {
-    if (!isClientReady) {
-      return res.json({ success: true, chats: [] });
-    }
-    
-    // Return cached chats
-    if (cachedChats.length > 0) {
-      return res.json({ success: true, chats: cachedChats });
-    }
-    
-    // If no cache, try to load
-    await loadChatsInBackground();
-    res.json({ success: true, chats: cachedChats });
-  } catch (error) {
-    res.json({ success: false, chats: [], error: error.message });
+// Get contacts for session
+app.get('/api/session/:sessionId/contacts', (req, res) => {
+  const { sessionId } = req.params;
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
   }
-});
-
-// Refresh chats
-app.post('/api/chats/refresh', async (req, res) => {
-  try {
-    if (!isClientReady) {
-      return res.json({ success: false, error: 'WhatsApp not connected' });
-    }
-    await loadChatsInBackground();
-    res.json({ success: true, chats: cachedChats });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
-});
-
-// Update settings
-app.post('/api/settings', (req, res) => {
-  settings = { ...settings, ...req.body };
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-  res.json({ success: true, settings });
-});
-
-// Get contacts
-app.get('/api/contacts', (req, res) => {
-  res.json({ success: true, contacts: contactsDb });
+  
+  res.json({ success: true, contacts: session.contacts });
 });
 
 // Add single contact
-app.post('/api/contacts', (req, res) => {
+app.post('/api/session/:sessionId/contacts', (req, res) => {
+  const { sessionId } = req.params;
   const { phone, name } = req.body;
-  if (!phone) return res.status(400).json({ success: false, error: 'Nomor diperlukan' });
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+  
+  if (!phone) {
+    return res.status(400).json({ success: false, error: 'Phone required' });
+  }
   
   const newContact = {
     id: Date.now(),
@@ -386,16 +419,24 @@ app.post('/api/contacts', (req, res) => {
     createdAt: new Date().toISOString()
   };
   
-  contactsDb.push(newContact);
-  saveContactsDb();
+  session.contacts.push(newContact);
+  saveSessionData(sessionId, session);
+  
   res.json({ success: true, contact: newContact });
 });
 
 // Add bulk contacts
-app.post('/api/contacts/bulk', (req, res) => {
+app.post('/api/session/:sessionId/contacts/bulk', (req, res) => {
+  const { sessionId } = req.params;
   const { contacts } = req.body;
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+  
   if (!contacts || !Array.isArray(contacts)) {
-    return res.status(400).json({ success: false, error: 'Data tidak valid' });
+    return res.status(400).json({ success: false, error: 'Invalid data' });
   }
   
   const newContacts = contacts.map(c => ({
@@ -405,28 +446,51 @@ app.post('/api/contacts/bulk', (req, res) => {
     createdAt: new Date().toISOString()
   }));
   
-  contactsDb.push(...newContacts);
-  saveContactsDb();
-  res.json({ success: true, contacts: newContacts, total: contactsDb.length });
+  session.contacts.push(...newContacts);
+  saveSessionData(sessionId, session);
+  
+  res.json({ success: true, contacts: newContacts, total: session.contacts.length });
 });
 
 // Delete contact
-app.delete('/api/contacts/:id', (req, res) => {
-  const id = parseFloat(req.params.id);
-  contactsDb = contactsDb.filter(c => c.id !== id);
-  saveContactsDb();
+app.delete('/api/session/:sessionId/contacts/:contactId', (req, res) => {
+  const { sessionId, contactId } = req.params;
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+  
+  session.contacts = session.contacts.filter(c => c.id !== parseFloat(contactId));
+  saveSessionData(sessionId, session);
+  
   res.json({ success: true });
 });
 
 // Clear all contacts
-app.delete('/api/contacts', (req, res) => {
-  contactsDb = [];
-  saveContactsDb();
+app.delete('/api/session/:sessionId/contacts', (req, res) => {
+  const { sessionId } = req.params;
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+  
+  session.contacts = [];
+  saveSessionData(sessionId, session);
+  
   res.json({ success: true });
 });
 
 // Upload contacts file
-app.post('/api/upload-contacts', upload.single('file'), (req, res) => {
+app.post('/api/session/:sessionId/upload-contacts', upload.single('file'), (req, res) => {
+  const { sessionId } = req.params;
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+  
   try {
     const contacts = parseContactsFile(req.file.path);
     const newContacts = contacts.map(c => ({
@@ -436,16 +500,17 @@ app.post('/api/upload-contacts', upload.single('file'), (req, res) => {
       createdAt: new Date().toISOString()
     }));
     
-    contactsDb.push(...newContacts);
-    saveContactsDb();
-    res.json({ success: true, contacts: newContacts, total: contactsDb.length });
+    session.contacts.push(...newContacts);
+    saveSessionData(sessionId, session);
+    
+    res.json({ success: true, contacts: newContacts, total: session.contacts.length });
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
   }
 });
 
 // Upload media
-app.post('/api/upload-media', upload.single('file'), (req, res) => {
+app.post('/api/session/:sessionId/upload-media', upload.single('file'), (req, res) => {
   try {
     res.json({ success: true, filePath: req.file.path, fileName: req.file.filename });
   } catch (error) {
@@ -453,127 +518,53 @@ app.post('/api/upload-media', upload.single('file'), (req, res) => {
   }
 });
 
-
-// Send bulk messages
-app.post('/api/send-bulk', async (req, res) => {
-  if (!isClientReady) {
-    return res.status(400).json({ success: false, error: 'WhatsApp belum terhubung' });
+// Update settings
+app.post('/api/session/:sessionId/settings', (req, res) => {
+  const { sessionId } = req.params;
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
   }
   
-  if (sendingInProgress) {
-    return res.status(400).json({ success: false, error: 'Pengiriman sedang berjalan' });
-  }
-
-  const { contacts, message, mediaPath } = req.body;
+  session.settings = { ...session.settings, ...req.body };
+  saveSessionData(sessionId, session);
   
-  if (!contacts || contacts.length === 0) {
-    return res.status(400).json({ success: false, error: 'Tidak ada kontak' });
-  }
-
-  if (!message && !mediaPath) {
-    return res.status(400).json({ success: false, error: 'Pesan atau media diperlukan' });
-  }
-
-  sendingInProgress = true;
-  currentJob = { total: contacts.length, sent: 0, failed: 0, results: [] };
-
-  res.json({ success: true, message: 'Pengiriman dimulai', total: contacts.length });
-  processBulkSend(contacts, message, mediaPath);
+  res.json({ success: true, settings: session.settings });
 });
 
-// Process bulk send
-async function processBulkSend(contacts, messageTemplate, mediaPath) {
-  log(`Memulai pengiriman ke ${contacts.length} kontak`, 'info');
+// Refresh chats
+app.post('/api/session/:sessionId/chats/refresh', async (req, res) => {
+  const { sessionId } = req.params;
+  const session = getSession(sessionId);
   
-  for (let i = 0; i < contacts.length; i++) {
-    if (!sendingInProgress) {
-      log('Pengiriman dihentikan', 'warn');
-      break;
-    }
-
-    if (!checkDailyLimit()) {
-      log(`Batas harian tercapai (${settings.dailyLimit})`, 'warn');
-      io.emit('limit_reached', { limit: settings.dailyLimit });
-      break;
-    }
-
-    if (needsBatchRest(i)) {
-      const restDuration = getBatchRestDuration();
-      log(`Istirahat batch ${Math.floor(restDuration/1000)}s`, 'info');
-      io.emit('batch_rest', { duration: Math.floor(restDuration/1000), batch: Math.floor(i/settings.batchSize) });
-      await new Promise(resolve => setTimeout(resolve, restDuration));
-    }
-
-    const contact = contacts[i];
-    const phone = formatPhoneNumber(contact.phone);
-    const personalizedMessage = replaceVariables(messageTemplate, contact);
-
-    try {
-      const isRegistered = await waClient.isRegisteredUser(phone);
-      if (!isRegistered) throw new Error('Nomor tidak terdaftar di WhatsApp');
-
-      await simulateTyping(phone);
-
-      if (mediaPath && fs.existsSync(mediaPath)) {
-        const media = MessageMedia.fromFilePath(mediaPath);
-        await waClient.sendMessage(phone, media, { caption: personalizedMessage });
-      } else {
-        await waClient.sendMessage(phone, personalizedMessage);
-      }
-
-      currentJob.sent++;
-      dailyCounter.count++;
-      sessionCounter++;
-      
-      const result = { phone: contact.phone, name: contact.name, status: 'success' };
-      currentJob.results.push(result);
-      log(`✓ Terkirim ke ${contact.name || contact.phone}`, 'success');
-      io.emit('message_sent', { ...result, progress: currentJob });
-
-    } catch (error) {
-      currentJob.failed++;
-      const result = { phone: contact.phone, name: contact.name, status: 'failed', error: error.message };
-      currentJob.results.push(result);
-      log(`✗ Gagal: ${contact.phone} - ${error.message}`, 'error');
-      io.emit('message_failed', { ...result, progress: currentJob });
-    }
-
-    if (i < contacts.length - 1 && sendingInProgress) {
-      const delay = getHumanizedDelay();
-      const isWarmup = sessionCounter <= settings.warmupMessages;
-      log(`Menunggu ${Math.floor(delay/1000)}s${isWarmup ? ' (warmup)' : ''}`, 'info');
-      io.emit('waiting', { delay: Math.floor(delay/1000), next: i + 2, total: contacts.length, isWarmup });
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
+  if (!session || !session.isReady) {
+    return res.json({ success: false, chats: [] });
   }
-
-  sendingInProgress = false;
-  io.emit('bulk_complete', currentJob);
-  log(`Selesai. Terkirim: ${currentJob.sent}, Gagal: ${currentJob.failed}`, 'success');
   
-  const resultFile = `./logs/result-${Date.now()}.json`;
-  fs.writeFileSync(resultFile, JSON.stringify(currentJob, null, 2));
-}
-
-// Stop sending
-app.post('/api/stop', (req, res) => {
-  sendingInProgress = false;
-  res.json({ success: true, message: 'Pengiriman dihentikan' });
+  // Will emit via socket
+  const socket = io.sockets.sockets.get(session.socketId);
+  if (socket) {
+    await loadChatsForSession(sessionId, socket);
+  }
+  
+  res.json({ success: true });
 });
 
-// Get logs
-app.get('/api/logs', (req, res) => {
-  res.json(messageLog.slice(-100));
-});
-
-// Logout
-app.post('/api/logout', async (req, res) => {
+// Logout WhatsApp
+app.post('/api/session/:sessionId/logout', async (req, res) => {
+  const { sessionId } = req.params;
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+  
   try {
-    if (waClient) {
-      await waClient.logout();
-      isClientReady = false;
-      waInfo = null;
-      cachedChats = [];
+    if (session.client) {
+      await session.client.logout();
+      session.isReady = false;
+      session.waInfo = null;
     }
     res.json({ success: true });
   } catch (error) {
@@ -581,42 +572,192 @@ app.post('/api/logout', async (req, res) => {
   }
 });
 
-// Restart
-app.post('/api/restart', async (req, res) => {
-  try {
-    if (waClient) {
-      await waClient.destroy();
-    }
-    isClientReady = false;
-    waInfo = null;
-    cachedChats = [];
-    sessionCounter = 0;
-    initWhatsApp();
-    res.json({ success: true, message: 'Restarting...' });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+// Stop sending
+app.post('/api/session/:sessionId/stop', (req, res) => {
+  const { sessionId } = req.params;
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
   }
+  
+  session.sendingInProgress = false;
+  res.json({ success: true });
 });
 
-// Socket.IO
+
+// Send bulk messages
+app.post('/api/session/:sessionId/send-bulk', async (req, res) => {
+  const { sessionId } = req.params;
+  const session = getSession(sessionId);
+  
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'Session not found' });
+  }
+  
+  if (!session.isReady) {
+    return res.status(400).json({ success: false, error: 'WhatsApp not connected' });
+  }
+  
+  if (session.sendingInProgress) {
+    return res.status(400).json({ success: false, error: 'Sending in progress' });
+  }
+  
+  const { contacts, message, mediaPath } = req.body;
+  
+  if (!contacts || contacts.length === 0) {
+    return res.status(400).json({ success: false, error: 'No contacts' });
+  }
+  
+  if (!message && !mediaPath) {
+    return res.status(400).json({ success: false, error: 'Message or media required' });
+  }
+  
+  session.sendingInProgress = true;
+  session.currentJob = { total: contacts.length, sent: 0, failed: 0, results: [] };
+  
+  res.json({ success: true, message: 'Sending started', total: contacts.length });
+  
+  // Process in background
+  processBulkSend(sessionId, contacts, message, mediaPath);
+});
+
+// Process bulk send
+async function processBulkSend(sessionId, contacts, messageTemplate, mediaPath) {
+  const session = getSession(sessionId);
+  if (!session) return;
+  
+  const socket = io.sockets.sockets.get(session.socketId);
+  
+  log(sessionId, `Starting bulk send to ${contacts.length} contacts`);
+  
+  for (let i = 0; i < contacts.length; i++) {
+    if (!session.sendingInProgress) {
+      log(sessionId, 'Sending stopped by user', 'warn');
+      break;
+    }
+    
+    if (!checkDailyLimit(session)) {
+      log(sessionId, `Daily limit reached (${session.settings.dailyLimit})`, 'warn');
+      if (socket) socket.emit('limit_reached', { limit: session.settings.dailyLimit });
+      break;
+    }
+    
+    if (needsBatchRest(session, i)) {
+      const restDuration = getBatchRestDuration(session);
+      log(sessionId, `Batch rest ${Math.floor(restDuration/1000)}s`);
+      if (socket) socket.emit('batch_rest', { duration: Math.floor(restDuration/1000), batch: Math.floor(i/session.settings.batchSize) });
+      await new Promise(resolve => setTimeout(resolve, restDuration));
+    }
+    
+    const contact = contacts[i];
+    const phone = formatPhoneNumber(contact.phone);
+    const personalizedMessage = replaceVariables(messageTemplate, contact);
+    
+    try {
+      const isRegistered = await session.client.isRegisteredUser(phone);
+      if (!isRegistered) throw new Error('Not registered on WhatsApp');
+      
+      await simulateTyping(session, phone);
+      
+      if (mediaPath && fs.existsSync(mediaPath)) {
+        const media = MessageMedia.fromFilePath(mediaPath);
+        await session.client.sendMessage(phone, media, { caption: personalizedMessage });
+      } else {
+        await session.client.sendMessage(phone, personalizedMessage);
+      }
+      
+      session.currentJob.sent++;
+      session.dailyCounter.count++;
+      session.sessionCounter++;
+      
+      const result = { phone: contact.phone, name: contact.name, status: 'success' };
+      session.currentJob.results.push(result);
+      log(sessionId, `✓ Sent to ${contact.name || contact.phone}`, 'success');
+      if (socket) socket.emit('message_sent', { ...result, progress: session.currentJob });
+      
+    } catch (error) {
+      session.currentJob.failed++;
+      const result = { phone: contact.phone, name: contact.name, status: 'failed', error: error.message };
+      session.currentJob.results.push(result);
+      log(sessionId, `✗ Failed: ${contact.phone} - ${error.message}`, 'error');
+      if (socket) socket.emit('message_failed', { ...result, progress: session.currentJob });
+    }
+    
+    if (i < contacts.length - 1 && session.sendingInProgress) {
+      const delay = getHumanizedDelay(session);
+      const isWarmup = session.sessionCounter <= session.settings.warmupMessages;
+      log(sessionId, `Waiting ${Math.floor(delay/1000)}s${isWarmup ? ' (warmup)' : ''}`);
+      if (socket) socket.emit('waiting', { delay: Math.floor(delay/1000), next: i + 2, total: contacts.length, isWarmup });
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  session.sendingInProgress = false;
+  saveSessionData(sessionId, session);
+  
+  if (socket) socket.emit('bulk_complete', session.currentJob);
+  log(sessionId, `Completed. Sent: ${session.currentJob.sent}, Failed: ${session.currentJob.failed}`, 'success');
+}
+
+// ============ SOCKET.IO ============
+
 io.on('connection', (socket) => {
-  log('Dashboard terhubung');
-  socket.emit('status', { 
-    status: isClientReady ? 'ready' : 'disconnected',
-    message: isClientReady ? 'WhatsApp terhubung' : 'WhatsApp belum terhubung',
-    waInfo
+  console.log('Client connected:', socket.id);
+  
+  // Client sends their session ID
+  socket.on('register_session', (data) => {
+    const { sessionId } = data;
+    
+    if (!sessionId) {
+      socket.emit('error', { message: 'Session ID required' });
+      return;
+    }
+    
+    let session = getSession(sessionId);
+    
+    // Create session if doesn't exist
+    if (!session) {
+      session = createSession(sessionId);
+    }
+    
+    // Store socket ID in session
+    session.socketId = socket.id;
+    
+    // Send current status
+    socket.emit('status', {
+      status: session.isReady ? 'ready' : 'disconnected',
+      message: session.isReady ? 'WhatsApp terhubung' : 'WhatsApp belum terhubung',
+      waInfo: session.waInfo
+    });
+    
+    log(sessionId, 'Session registered');
   });
   
-  // Send cached chats if available
-  if (cachedChats.length > 0) {
-    socket.emit('chats_loaded', cachedChats);
-  }
+  // Start WhatsApp connection
+  socket.on('start_whatsapp', (data) => {
+    const { sessionId } = data;
+    const session = getSession(sessionId);
+    
+    if (!session) {
+      socket.emit('error', { message: 'Session not found' });
+      return;
+    }
+    
+    log(sessionId, 'Starting WhatsApp connection...');
+    initWhatsAppForSession(sessionId, socket);
+  });
+  
+  // Disconnect
+  socket.on('disconnect', () => {
+    console.log('Client disconnected:', socket.id);
+  });
 });
 
-// Start server
+// ============ START SERVER ============
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`\n🌸 Beautylatory Smart Bulk Sender`);
+  console.log(`\n🌸 Beautylatory Smart Bulk Sender (Multi-User)`);
   console.log(`📍 http://localhost:${PORT}\n`);
-  initWhatsApp();
 });
